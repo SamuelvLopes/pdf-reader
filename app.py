@@ -228,18 +228,19 @@ def parse_neoenergia_pe(text: str) -> dict:
         out["total_amount"] = br_money_to_float(m.group(2))
         out["due_date"] = br_date_to_iso(m.group(3))
 
-    # access key (robust: look for 11 groups of 4 digits)
-    m = re.search(r"(?:\d{4}\s+){10}\d{4}", text)
+    # access key (strict: look for 11 groups of 4 digits with word boundaries)
+    # This prevents capturing suffixes of previous numbers (like "0065" from customer code)
+    # Pattern: 4 digits, followed by 10 groups of (space + 4 digits)
+    m = re.search(r"\b\d{4}(?:\s+\d{4}){10}\b", text)
     if m:
         out["access_key"] = only_digits(m.group(0))
     else:
-        # Fallback: capture block and extract 44 digits if isolated
-        m = re.search(r"chave de acesso:\s*\n\s*([0-9\s]{40,80})", text, re.IGNORECASE)
+        # Fallback: Just look for a stricter block of digits that might be the key
+        # We search specifically for the label "chave de acesso" and try to find the pattern nearby
+        # WITHOUT merging everything first.
+        m = re.search(r"chave de acesso:[\s\S]{0,100}?\b(\d{4}(?:\s+\d{4}){10})\b", text, re.IGNORECASE)
         if m:
-            digits = re.sub(r"\D+", "", m.group(1))
-            m44 = re.search(r"(\d{44})", digits)
-            if m44:
-                 out["access_key"] = m44.group(1)
+            out["access_key"] = only_digits(m.group(1))
 
     # protocol + datetime
     m = re.search(r"Protocolo de autorização:\s*(\d+)\s*-\s*(\d{2}/\d{2}/\d{4})\s*às\s*(\d{2}:\d{2}:\d{2})", text, re.IGNORECASE)
@@ -322,7 +323,7 @@ def parse_neoenergia_pe(text: str) -> dict:
     if not out["access_key"]:
         warnings.append("access_key_not_found")
     elif len(out["access_key"]) != 44:
-        warnings.append("access_key_length_mismatch")
+        warnings.append("invalid_access_key_length")
         
     if not items:
         warnings.append("items_not_found")

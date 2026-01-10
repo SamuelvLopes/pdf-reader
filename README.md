@@ -50,6 +50,36 @@ Self-hosted API for PDF password removal and text extraction. Designed for integ
 {
   "success": true,
   "pages": 5,
+  "structured": {
+    "supplier": {
+      "name": "COMPANHIA ENERGÉTICA DE PERNAMBUCO",
+      "cnpj": "10835932000108",
+      "state_registration": "0005943-93"
+    },
+    "customer": {
+      "name": "PEDRO FERREIRA DE FARIA JUNIOR",
+      "cpf_masked": "143.9**.***-**"
+    },
+    "installation_code": "6891240",
+    "customer_code": "7063350065",
+    "reference_month_year": "12/2025",
+    "invoice": {
+      "number": "391530924",
+      "series": "000",
+      "issue_date": "2025-12-27"
+    },
+    "due_date": "2026-01-26",
+    "total_amount": 415.90,
+    "currency": "BRL",
+    "access_key": "26251210835932000108660003915309241057457789",
+    "authorization_protocol": {
+      "number": "3262500051052962",
+      "datetime": "2025-12-27T22:28:34"
+    },
+    "barcode": {
+      "linha_digitavel": "838200000045159000110074063350065100174932420532"
+    }
+  },
   "text": "Extracted text content..."
 }
 ```

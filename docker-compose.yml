@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  pdf-tools:
+    build: .
+    ports:
+      - "8787:8787"
+    restart: always

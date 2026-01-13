@@ -164,6 +164,7 @@ def parse_neoenergia_pe(text: str) -> dict:
         "access_key": None,
         "authorization_protocol": {"number": None, "datetime": None},
         "barcode": {"linha_digitavel": None},
+        "meter_readings": [],
     }
 
     # supplier name
@@ -315,6 +316,50 @@ def parse_neoenergia_pe(text: str) -> dict:
     
     out["items"] = items
 
+    # Meter readings table (MEDIDOR/LEITURAS/CONSUMO)
+    meter_readings = []
+    meter_block = []
+    in_meter_block = False
+    for line in lines:
+        if not in_meter_block and "MEDIDOR" in line and "CONSUMO" in line:
+            in_meter_block = True
+            continue
+        if in_meter_block:
+            stripped = line.strip()
+            if not stripped:
+                # allow multiple blank lines before ending
+                if meter_block:
+                    break
+                continue
+            if "RESERVADO AO FISCO" in stripped or "ATENÇÃO" in stripped:
+                break
+            meter_block.append(stripped)
+
+    meter_pattern = re.compile(
+        r"^(?P<meter>\d+)\s+"
+        r"(?P<magnitude>[A-Za-zÀ-ÿ\s]+?)\s+"
+        r"(?P<slot>Único|Ponta|Fora\s+Ponta|Intermediário)\s+"
+        r"(?P<prev>\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<curr>\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<const>\d+,\d+)\s+"
+        r"(?P<kwh>\d{1,3}(?:\.\d{3})*,\d{2})"
+    )
+
+    for line in meter_block:
+        m = meter_pattern.search(line)
+        if m:
+            meter_readings.append({
+                "meter_number": m.group("meter"),
+                "magnitude": m.group("magnitude").strip(),
+                "time_slot": re.sub(r"\s+", " ", m.group("slot")).strip(),
+                "previous_reading": br_money_to_float(m.group("prev")),
+                "current_reading": br_money_to_float(m.group("curr")),
+                "meter_constant": br_money_to_float(m.group("const")),
+                "consumption_kwh": br_money_to_float(m.group("kwh")),
+            })
+
+    out["meter_readings"] = meter_readings
+
     # Validation
     warnings = []
     if not out["customer_code"]:
@@ -327,6 +372,9 @@ def parse_neoenergia_pe(text: str) -> dict:
         
     if not items:
         warnings.append("items_not_found")
+
+    if not meter_readings:
+        warnings.append("meter_readings_not_found")
     
     out["validation"] = {
         "ok": len(warnings) == 0,

@@ -150,6 +150,31 @@ def br_date_to_iso(s: str | None) -> str | None:
     except ValueError:
         return None
 
+def find_linha_digitavel(text: str) -> str | None:
+    patterns = [
+        # Boleto bancário (47 dígitos com pontos e espaços)
+        r"\b(\d{5}\.\d{5}\s+\d{5}\.\d{6}\s+\d{5}\.\d{6}\s+\d\s+\d{14})\b",
+        # Arrecadação (48 dígitos em 4 blocos)
+        r"\b(\d{11,12}\s+\d{11,12}\s+\d{11,12}\s+\d{11,12})\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            digits = only_digits(m.group(1))
+            if digits and len(digits) in (44, 47, 48):
+                return digits
+
+    # Fallback por linha: sequência numérica longa com espaços/pontos
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if re.fullmatch(r"[\d\.\s]+", candidate):
+            digits = only_digits(candidate)
+            if digits and len(digits) in (44, 47, 48):
+                return digits
+    return None
+
 def parse_neoenergia_pe(text: str) -> dict:
     out = {
         "supplier": {"name": None, "cnpj": None, "state_registration": None},
@@ -251,10 +276,8 @@ def parse_neoenergia_pe(text: str) -> dict:
         if iso_date:
             out["authorization_protocol"]["datetime"] = f"{iso_date}T{m.group(3)}"
 
-    # linha digitável (pega a sequência longa de números com espaços, depois normaliza)
-    m = re.search(r"\n\s*([0-9]{5,}\s+[0-9]{5,}\s+[0-9]{5,}\s+[0-9]{5,})\s+PAGUE COM PIX", text, re.IGNORECASE)
-    if m:
-        out["barcode"]["linha_digitavel"] = only_digits(m.group(1))
+    # linha digitável (boleto/arrecadação)
+    out["barcode"]["linha_digitavel"] = find_linha_digitavel(text)
 
     # Items Parsing
     items = []
@@ -281,6 +304,24 @@ def parse_neoenergia_pe(text: str) -> dict:
                 continue
 
             # Parsing Item Line
+            # Multa/Juros de NF: descrição + referência da nota + valor monetário no fim
+            multa_juros_match = re.match(
+                r"^(?P<desc>(?:Multa|Juros)-NF)\s+(?P<ref>\d{5,})\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2})$",
+                line_str,
+                re.IGNORECASE
+            )
+            if multa_juros_match:
+                items.append({
+                    "description": multa_juros_match.group("desc"),
+                    "reference_invoice": multa_juros_match.group("ref"),
+                    "unit": None,
+                    "quantity": None,
+                    "unit_price": None,
+                    "amount": br_money_to_float(multa_juros_match.group("amount"))
+                })
+                continue
+
+            # Parsing Item Line
             # Regex for Complex line: Desc + Unit + Quant + Price + Amount
             # "Consumo-TUSD kWh 317,67 0,66209102 210,32"
             match_complex = re.match(r"^(.+?)\s+(kWh)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)", line_str)
@@ -294,13 +335,12 @@ def parse_neoenergia_pe(text: str) -> dict:
                 })
                 continue
             
-            # Parsing Simple Line: Desc + Amount
+            # Parsing Simple Line: descrição + valor monetário final da linha
             # "Ilum. Púb. Municipal 35,91"
-            # Find first float and everything before it
-            match_simple = re.search(r"^([^\d]+?)\s+([\d,.]+)", line_str)
+            match_simple = re.search(r"^(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2})\s*$", line_str)
             if match_simple:
-                desc = match_simple.group(1).strip()
-                val = br_money_to_float(match_simple.group(2))
+                desc = match_simple.group("desc").strip()
+                val = br_money_to_float(match_simple.group("amount"))
                 
                 # Filter out obvious non-items or tax table rows
                 if desc in ["PIS", "COFINS", "ICMS"] and val > 100: pass
@@ -358,6 +398,23 @@ def parse_neoenergia_pe(text: str) -> dict:
                 "consumption_kwh": br_money_to_float(m.group("kwh")),
             })
 
+    # Fallback para layout alternativo:
+    # MEDIDOR <id>
+    # LEITURA ANTERIOR dd/mm/yyyy
+    # LEITURA ATUAL dd/mm/yyyy
+    if not meter_readings:
+        fallback_meter = re.search(
+            r"MEDIDOR\s+([A-Z0-9]+)[\s\S]{0,120}?LEITURA\s+ANTERIOR\s+(\d{2}/\d{2}/\d{2,4})[\s\S]{0,120}?LEITURA\s+ATUAL\s+(\d{2}/\d{2}/\d{2,4})",
+            text,
+            re.IGNORECASE
+        )
+        if fallback_meter:
+            meter_readings.append({
+                "meter": fallback_meter.group(1),
+                "previous_reading_date": br_date_to_iso(fallback_meter.group(2)),
+                "current_reading_date": br_date_to_iso(fallback_meter.group(3)),
+            })
+
     out["meter_readings"] = meter_readings
 
     # Validation
@@ -375,10 +432,19 @@ def parse_neoenergia_pe(text: str) -> dict:
 
     if not meter_readings:
         warnings.append("meter_readings_not_found")
+
+    items_total = None
+    if items:
+        items_total = round(sum(item.get("amount") or 0.0 for item in items), 2)
+    if items_total is not None and out["total_amount"] is not None:
+        diff = abs(items_total - out["total_amount"])
+        if diff > 0.01:
+            warnings.append(f"items_total_mismatch:{diff:.2f}")
     
     out["validation"] = {
         "ok": len(warnings) == 0,
-        "warnings": warnings
+        "warnings": warnings,
+        "items_total": items_total
     }
 
     return out

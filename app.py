@@ -167,6 +167,15 @@ def extract_taxes(text: str) -> list[dict]:
             seen.add(key)
     return deduped
 
+
+def parse_tusd_gdii_amount(line: str) -> float | None:
+    """Extract chargeable amount from TUSD GDII line, ignoring trailing tax fields."""
+    values = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line)
+    if not values:
+        return None
+    # Neoenergia DANFE places the item amount as the first monetary token in this line.
+    return br_money_to_float(values[0])
+
 def br_date_to_iso(s: str | None) -> str | None:
     if not s:
         return None
@@ -348,18 +357,7 @@ def parse_neoenergia_pe(text: str) -> dict:
             # TUSD GDII line frequently carries ICMS values in the same row.
             # We keep the item amount as the value before "ICMS", not the tax amount.
             if re.search(r"\bTUSD\s+GDII\s+com\s+trib\.", line_str, re.IGNORECASE):
-                amount = None
-                m_amt_before_icms = re.search(
-                    r"TUSD\s+GDII\s+com\s+trib\.[\s\S]*?(\d{1,3}(?:\.\d{3})*,\d{2})\s+ICMS\b",
-                    line_str,
-                    re.IGNORECASE,
-                )
-                if m_amt_before_icms:
-                    amount = br_money_to_float(m_amt_before_icms.group(1))
-                else:
-                    nums = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line_str)
-                    if nums:
-                        amount = br_money_to_float(nums[-1])
+                amount = parse_tusd_gdii_amount(line_str)
                 if amount is not None:
                     items.append(
                         {
@@ -466,6 +464,31 @@ def parse_neoenergia_pe(text: str) -> dict:
                 "current_reading_date": current_reading_date,
                 "next_reading_date": next_reading_date,
             })
+
+    # Fallback for noisy OCR/ layout lines where only meter + numeric fields are reliable.
+    if not meter_readings:
+        loose_meter_pattern = re.compile(
+            r"^\s*(?P<meter>[A-Z0-9]{5,})\b.*?"
+            r"(?P<prev>\d{1,3}(?:\.\d{3})*,\d{2})\b.*?"
+            r"(?P<curr>\d{1,3}(?:\.\d{3})*,\d{2})\b.*?"
+            r"(?P<multiplier>\d+,\d{1,5})\b.*?"
+            r"(?P<kwh>\d{1,3}(?:\.\d{3})*,\d{2})\b",
+            re.IGNORECASE
+        )
+        for line in lines:
+            m = loose_meter_pattern.search(line)
+            if m:
+                meter_readings.append({
+                    "meter": m.group("meter"),
+                    "measure": "Energia Ativa",
+                    "previous_reading": br_money_to_float(m.group("prev")),
+                    "current_reading": br_money_to_float(m.group("curr")),
+                    "multiplier": br_money_to_float(m.group("multiplier")),
+                    "consumption_kwh": br_money_to_float(m.group("kwh")),
+                    "previous_reading_date": previous_reading_date,
+                    "current_reading_date": current_reading_date,
+                    "next_reading_date": next_reading_date,
+                })
 
     # Fallback para layout alternativo:
     # MEDIDOR <id>

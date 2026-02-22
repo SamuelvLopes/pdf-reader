@@ -178,6 +178,55 @@ B92417  Energia Ativa  Único  6.328,00  8.327,00  1,00000  0,00
         self.assertEqual(reading["current_reading_date"], "2026-01-16")
         self.assertEqual(reading["next_reading_date"], "2026-02-13")
 
+    def test_tusd_uses_first_monetary_value_not_trailing_tax_values(self):
+        text = """
+REF:MÊS/ANO                       TOTAL A PAGAR R$                         VENCIMENTO
+01/2026                                      444,13                   11/02/2026
+ITENS DA FATURA
+TUSD GDII com trib.                                                                                436,34                  22,09            436,34      20,50
+Multa-NF 391026567 7,42
+Juros-NF 391026567 0,37
+TOTAL 444,13
+PIS 346,89 1,14 3,95
+COFINS 346,89 5,23 18,14
+ICMS 436,34 20,50 89,44
+"""
+        result = parse_neoenergia_pe(text)
+        tusd_item = next(item for item in result["items"] if item["description"] == "TUSD GDII com trib.")
+        self.assertAlmostEqual(tusd_item["amount"], 436.34, places=2)
+        self.assertEqual(result["validation"]["items_total"], 444.13)
+        self.assertNotIn("items_total_mismatch:0.01", result["validation"]["warnings"])
+        self.assertFalse(any(w.startswith("items_total_mismatch:") for w in result["validation"]["warnings"]))
+
+    def test_extracts_meter_row_from_noisy_layout_and_clears_warning(self):
+        text = """
+REF:MÊS/ANO                       TOTAL A PAGAR R$                         VENCIMENTO
+01/2026                                      444,13                   11/02/2026
+ITENS DA FATURA
+TUSD GDII com trib. 436,34
+Multa-NF 391026567 7,42
+Juros-NF 391026567 0,37
+TOTAL 444,13
+LEITURA ANTERIOR 18/12/2025
+LEITURA ATUAL 16/01/2026
+PRÓXIMA LEITURA 13/02/2026
+B92417 ... 6.328,00 ... 8.327,00 ... 1,00000 ... 0,00
+"""
+        result = parse_neoenergia_pe(text)
+
+        self.assertEqual(len(result["meter_readings"]), 1)
+        reading = result["meter_readings"][0]
+        self.assertEqual(reading["meter"], "B92417")
+        self.assertEqual(reading["measure"], "Energia Ativa")
+        self.assertAlmostEqual(reading["previous_reading"], 6328.00, places=2)
+        self.assertAlmostEqual(reading["current_reading"], 8327.00, places=2)
+        self.assertAlmostEqual(reading["multiplier"], 1.0, places=5)
+        self.assertAlmostEqual(reading["consumption_kwh"], 0.0, places=2)
+        self.assertEqual(reading["previous_reading_date"], "2025-12-18")
+        self.assertEqual(reading["current_reading_date"], "2026-01-16")
+        self.assertEqual(reading["next_reading_date"], "2026-02-13")
+        self.assertNotIn("meter_readings_not_found", result["validation"]["warnings"])
+
 
 if __name__ == "__main__":
     unittest.main()

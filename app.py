@@ -134,6 +134,39 @@ def br_money_to_float(s: str | None) -> float | None:
     except ValueError:
         return None
 
+def extract_taxes(text: str) -> list[dict]:
+    taxes = []
+    tax_pattern = re.compile(r"^\s*(PIS|COFINS|ICMS)\b", re.IGNORECASE)
+    br_number_pattern = re.compile(r"\d{1,3}(?:\.\d{3})*,\d{2,5}")
+
+    for line in text.splitlines():
+        if not tax_pattern.search(line):
+            continue
+
+        tax_type_match = tax_pattern.search(line)
+        values = br_number_pattern.findall(line)
+        if not tax_type_match or len(values) < 3:
+            continue
+
+        base, rate, amount = values[-3], values[-2], values[-1]
+        taxes.append(
+            {
+                "type": tax_type_match.group(1).upper(),
+                "base": br_money_to_float(base),
+                "rate": br_money_to_float(rate),
+                "amount": br_money_to_float(amount),
+            }
+        )
+
+    deduped = []
+    seen = set()
+    for tax in taxes:
+        key = (tax["type"], tax["base"], tax["rate"], tax["amount"])
+        if key not in seen:
+            deduped.append(tax)
+            seen.add(key)
+    return deduped
+
 def br_date_to_iso(s: str | None) -> str | None:
     if not s:
         return None
@@ -190,6 +223,7 @@ def parse_neoenergia_pe(text: str) -> dict:
         "authorization_protocol": {"number": None, "datetime": None},
         "barcode": {"linha_digitavel": None},
         "meter_readings": [],
+        "taxes": [],
     }
 
     # supplier name
@@ -279,6 +313,10 @@ def parse_neoenergia_pe(text: str) -> dict:
     # linha digitável (boleto/arrecadação)
     out["barcode"]["linha_digitavel"] = find_linha_digitavel(text)
 
+    # Taxes parsing (kept outside of chargeable items)
+    taxes = extract_taxes(text)
+    out["taxes"] = taxes
+
     # Items Parsing
     items = []
     lines = text.splitlines()
@@ -301,6 +339,37 @@ def parse_neoenergia_pe(text: str) -> dict:
             
             # Skip headers
             if "UNID." in line or "PREÇO UNIT." in line or "COM TRIB." in line or "ICMS" in line and "TARIFA" in line:
+                continue
+
+            # Keep tax lines out of chargeable items
+            if re.match(r"^(PIS|COFINS|ICMS)\b", line_str, re.IGNORECASE):
+                continue
+
+            # TUSD GDII line frequently carries ICMS values in the same row.
+            # We keep the item amount as the value before "ICMS", not the tax amount.
+            if re.search(r"\bTUSD\s+GDII\s+com\s+trib\.", line_str, re.IGNORECASE):
+                amount = None
+                m_amt_before_icms = re.search(
+                    r"TUSD\s+GDII\s+com\s+trib\.[\s\S]*?(\d{1,3}(?:\.\d{3})*,\d{2})\s+ICMS\b",
+                    line_str,
+                    re.IGNORECASE,
+                )
+                if m_amt_before_icms:
+                    amount = br_money_to_float(m_amt_before_icms.group(1))
+                else:
+                    nums = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line_str)
+                    if nums:
+                        amount = br_money_to_float(nums[-1])
+                if amount is not None:
+                    items.append(
+                        {
+                            "description": "TUSD GDII com trib.",
+                            "unit": None,
+                            "quantity": None,
+                            "unit_price": None,
+                            "amount": amount,
+                        }
+                    )
                 continue
 
             # Parsing Item Line
@@ -356,46 +425,46 @@ def parse_neoenergia_pe(text: str) -> dict:
     
     out["items"] = items
 
-    # Meter readings table (MEDIDOR/LEITURAS/CONSUMO)
-    meter_readings = []
-    meter_block = []
-    in_meter_block = False
-    for line in lines:
-        if not in_meter_block and "MEDIDOR" in line and "CONSUMO" in line:
-            in_meter_block = True
-            continue
-        if in_meter_block:
-            stripped = line.strip()
-            if not stripped:
-                # allow multiple blank lines before ending
-                if meter_block:
-                    break
-                continue
-            if "RESERVADO AO FISCO" in stripped or "ATENÇÃO" in stripped:
-                break
-            meter_block.append(stripped)
+    # Meter reading dates
+    previous_reading_date = None
+    current_reading_date = None
+    next_reading_date = None
 
+    m = re.search(r"LEITURA\s+ANTERIOR\s+(\d{2}/\d{2}/\d{2,4})", text, re.IGNORECASE)
+    if m:
+        previous_reading_date = br_date_to_iso(m.group(1))
+    m = re.search(r"LEITURA\s+ATUAL\s+(\d{2}/\d{2}/\d{2,4})", text, re.IGNORECASE)
+    if m:
+        current_reading_date = br_date_to_iso(m.group(1))
+    m = re.search(r"PR[ÓO]XIMA\s+LEITURA\s+(\d{2}/\d{2}/\d{2,4})", text, re.IGNORECASE)
+    if m:
+        next_reading_date = br_date_to_iso(m.group(1))
+
+    # Meter readings table
+    meter_readings = []
     meter_pattern = re.compile(
-        r"^(?P<meter>\d+)\s+"
-        r"(?P<magnitude>[A-Za-zÀ-ÿ\s]+?)\s+"
-        r"(?P<slot>Único|Ponta|Fora\s+Ponta|Intermediário)\s+"
+        r"^\s*(?P<meter>[A-Z0-9]+)\s+"
+        r"(?P<measure>[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,4})\s+"
+        r"(?P<slot>Único|Unico|Ponta|Fora\s+Ponta|Intermediário|Intermediario)\s+"
         r"(?P<prev>\d{1,3}(?:\.\d{3})*,\d{2})\s+"
         r"(?P<curr>\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<const>\d+,\d+)\s+"
+        r"(?P<multiplier>\d+,\d{1,5})\s+"
         r"(?P<kwh>\d{1,3}(?:\.\d{3})*,\d{2})"
     )
 
-    for line in meter_block:
+    for line in lines:
         m = meter_pattern.search(line)
         if m:
             meter_readings.append({
-                "meter_number": m.group("meter"),
-                "magnitude": m.group("magnitude").strip(),
-                "time_slot": re.sub(r"\s+", " ", m.group("slot")).strip(),
+                "meter": m.group("meter"),
+                "measure": m.group("measure").strip(),
                 "previous_reading": br_money_to_float(m.group("prev")),
                 "current_reading": br_money_to_float(m.group("curr")),
-                "meter_constant": br_money_to_float(m.group("const")),
+                "multiplier": br_money_to_float(m.group("multiplier")),
                 "consumption_kwh": br_money_to_float(m.group("kwh")),
+                "previous_reading_date": previous_reading_date,
+                "current_reading_date": current_reading_date,
+                "next_reading_date": next_reading_date,
             })
 
     # Fallback para layout alternativo:
@@ -413,6 +482,7 @@ def parse_neoenergia_pe(text: str) -> dict:
                 "meter": fallback_meter.group(1),
                 "previous_reading_date": br_date_to_iso(fallback_meter.group(2)),
                 "current_reading_date": br_date_to_iso(fallback_meter.group(3)),
+                "next_reading_date": next_reading_date,
             })
 
     out["meter_readings"] = meter_readings

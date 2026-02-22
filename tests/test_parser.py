@@ -91,6 +91,7 @@ TOTAL 7,79
 MEDIDOR B92417
 LEITURA ANTERIOR 18/12/2025
 LEITURA ATUAL 16/01/2026
+PRÓXIMA LEITURA 13/02/2026
 """
         result = parse_neoenergia_pe(text)
 
@@ -99,6 +100,7 @@ LEITURA ATUAL 16/01/2026
         self.assertEqual(reading["meter"], "B92417")
         self.assertEqual(reading["previous_reading_date"], "2025-12-18")
         self.assertEqual(reading["current_reading_date"], "2026-01-16")
+        self.assertEqual(reading["next_reading_date"], "2026-02-13")
 
     def test_warns_when_items_sum_diverges_from_total(self):
         text = """
@@ -112,6 +114,69 @@ TOTAL 100,00
         result = parse_neoenergia_pe(text)
         warnings = result["validation"]["warnings"]
         self.assertTrue(any(w.startswith("items_total_mismatch:") for w in warnings))
+
+    def test_moves_tax_lines_to_taxes_and_keeps_chargeable_items(self):
+        text = """
+REF:MÊS/ANO                       TOTAL A PAGAR R$                         VENCIMENTO
+01/2026                                      444,13                   26/01/2026
+ITENS DA FATURA
+TUSD GDII com trib.              436,34 ICMS 20,50 89,44
+Multa-NF 391026567 7,42
+Juros-NF 391026567 0,37
+TOTAL 444,13
+PIS 346,89 1,14 3,95
+COFINS 346,89 5,23 18,14
+ICMS 436,34 20,50 89,44
+"""
+        result = parse_neoenergia_pe(text)
+
+        self.assertEqual(result["validation"]["items_total"], 444.13)
+        warnings = result["validation"]["warnings"]
+        self.assertFalse(any(w.startswith("items_total_mismatch:") for w in warnings))
+
+        item_descriptions = [item["description"] for item in result["items"]]
+        self.assertIn("TUSD GDII com trib.", item_descriptions)
+        self.assertIn("Multa-NF", item_descriptions)
+        self.assertIn("Juros-NF", item_descriptions)
+        self.assertNotIn("PIS", item_descriptions)
+        self.assertNotIn("COFINS", item_descriptions)
+        self.assertNotIn("ICMS", item_descriptions)
+
+        tusd_item = next(item for item in result["items"] if item["description"] == "TUSD GDII com trib.")
+        self.assertAlmostEqual(tusd_item["amount"], 436.34, places=2)
+
+        taxes = result["taxes"]
+        self.assertEqual(len(taxes), 3)
+        pis = next(t for t in taxes if t["type"] == "PIS")
+        cofins = next(t for t in taxes if t["type"] == "COFINS")
+        icms = next(t for t in taxes if t["type"] == "ICMS")
+
+        self.assertAlmostEqual(pis["base"], 346.89, places=2)
+        self.assertAlmostEqual(pis["rate"], 1.14, places=2)
+        self.assertAlmostEqual(pis["amount"], 3.95, places=2)
+        self.assertAlmostEqual(cofins["amount"], 18.14, places=2)
+        self.assertAlmostEqual(icms["amount"], 89.44, places=2)
+
+    def test_extracts_meter_reading_row_with_dates(self):
+        text = """
+LEITURA ANTERIOR 18/12/2025
+LEITURA ATUAL 16/01/2026
+PRÓXIMA LEITURA 13/02/2026
+B92417  Energia Ativa  Único  6.328,00  8.327,00  1,00000  0,00
+"""
+        result = parse_neoenergia_pe(text)
+
+        self.assertEqual(len(result["meter_readings"]), 1)
+        reading = result["meter_readings"][0]
+        self.assertEqual(reading["meter"], "B92417")
+        self.assertEqual(reading["measure"], "Energia Ativa")
+        self.assertAlmostEqual(reading["previous_reading"], 6328.00, places=2)
+        self.assertAlmostEqual(reading["current_reading"], 8327.00, places=2)
+        self.assertAlmostEqual(reading["multiplier"], 1.0, places=5)
+        self.assertAlmostEqual(reading["consumption_kwh"], 0.0, places=2)
+        self.assertEqual(reading["previous_reading_date"], "2025-12-18")
+        self.assertEqual(reading["current_reading_date"], "2026-01-16")
+        self.assertEqual(reading["next_reading_date"], "2026-02-13")
 
 
 if __name__ == "__main__":

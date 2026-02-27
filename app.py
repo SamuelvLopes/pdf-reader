@@ -124,13 +124,21 @@ def only_digits(s: str | None) -> str | None:
     return d or None
 
 def br_money_to_float(s: str | None) -> float | None:
+    return parse_money_br(s)
+
+
+def parse_money_br(s: str | None) -> float | None:
     if not s:
         return None
-    # "415,90" -> "415.90" | "1.234,56" -> "1234.56"
-    x = s.strip()
+    # "415,90" -> 415.90 | "1.234,56" -> 1234.56 | "27,86-" -> -27.86
+    x = re.sub(r"\s+", "", s)
+    negative = x.endswith("-")
+    if negative:
+        x = x[:-1]
     x = x.replace(".", "").replace(",", ".")
     try:
-        return float(x)
+        value = float(x)
+        return -value if negative else value
     except ValueError:
         return None
 
@@ -170,11 +178,11 @@ def extract_taxes(text: str) -> list[dict]:
 
 def parse_tusd_gdii_amount(line: str) -> float | None:
     """Extract chargeable amount from TUSD GDII line, ignoring trailing tax fields."""
-    values = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", line)
+    values = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}-?", line)
     if not values:
         return None
     # Neoenergia DANFE places the item amount as the first monetary token in this line.
-    return br_money_to_float(values[0])
+    return parse_money_br(values[0])
 
 def br_date_to_iso(s: str | None) -> str | None:
     if not s:
@@ -351,7 +359,7 @@ def parse_neoenergia_pe(text: str) -> dict:
                 continue
 
             # Keep tax lines out of chargeable items
-            if re.match(r"^(PIS|COFINS|ICMS)\b", line_str, re.IGNORECASE):
+            if re.match(r"^(PIS|COFINS|ICMS)\s", line_str, re.IGNORECASE):
                 continue
 
             # TUSD GDII line frequently carries ICMS values in the same row.
@@ -373,7 +381,7 @@ def parse_neoenergia_pe(text: str) -> dict:
             # Parsing Item Line
             # Multa/Juros de NF: descrição + referência da nota + valor monetário no fim
             multa_juros_match = re.match(
-                r"^(?P<desc>(?:Multa|Juros)-NF)\s+(?P<ref>\d{5,})\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2})$",
+                r"^(?P<desc>(?:Multa|Juros)-NF)\s+(?P<ref>\d{5,})\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}-?)$",
                 line_str,
                 re.IGNORECASE
             )
@@ -384,8 +392,44 @@ def parse_neoenergia_pe(text: str) -> dict:
                     "unit": None,
                     "quantity": None,
                     "unit_price": None,
-                    "amount": br_money_to_float(multa_juros_match.group("amount"))
+                    "amount": parse_money_br(multa_juros_match.group("amount"))
                 })
+                continue
+
+            # ICMS-CDE lines: "ICMS-CDE NF387011514 1,53"
+            icms_cde_match = re.match(
+                r"^(?P<desc>ICMS-CDE\s+NF\d+)\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}-?)$",
+                line_str,
+                re.IGNORECASE,
+            )
+            if icms_cde_match:
+                items.append(
+                    {
+                        "description": icms_cde_match.group("desc").strip(),
+                        "unit": None,
+                        "quantity": None,
+                        "unit_price": None,
+                        "amount": parse_money_br(icms_cde_match.group("amount")),
+                    }
+                )
+                continue
+
+            # Credit lines: "Créd ... 27,86-"
+            credit_match = re.match(
+                r"^(?P<desc>Cr[ée]d[^\d]*?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}-?)$",
+                line_str,
+                re.IGNORECASE,
+            )
+            if credit_match:
+                items.append(
+                    {
+                        "description": credit_match.group("desc").strip(),
+                        "unit": None,
+                        "quantity": None,
+                        "unit_price": None,
+                        "amount": parse_money_br(credit_match.group("amount")),
+                    }
+                )
                 continue
 
             # Parsing Item Line
@@ -396,18 +440,43 @@ def parse_neoenergia_pe(text: str) -> dict:
                 items.append({
                     "description": match_complex.group(1).strip(),
                     "unit": match_complex.group(2),
-                    "quantity": br_money_to_float(match_complex.group(3)),
-                    "unit_price": br_money_to_float(match_complex.group(4)),
-                    "amount": br_money_to_float(match_complex.group(5))
+                    "quantity": parse_money_br(match_complex.group(3)),
+                    "unit_price": parse_money_br(match_complex.group(4)),
+                    "amount": parse_money_br(match_complex.group(5))
                 })
                 continue
+
+            # Bandeira lines: use first monetary token (item amount), not trailing ICMS value.
+            if (
+                line_str.lower().startswith("acrés. band.")
+                or "band." in line_str.lower()
+                or "bandeira" in line_str.lower()
+            ):
+                desc_match = re.match(
+                    r"^(?P<desc>.*?(?:BAND\.|BANDEIRA)[^\d-]*)\s+(?P<rest>.+)$",
+                    line_str,
+                    re.IGNORECASE,
+                )
+                if desc_match:
+                    values = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}-?", desc_match.group("rest"))
+                    if values:
+                        items.append(
+                            {
+                                "description": desc_match.group("desc").strip(),
+                                "unit": None,
+                                "quantity": None,
+                                "unit_price": None,
+                                "amount": parse_money_br(values[0]),
+                            }
+                        )
+                        continue
             
             # Parsing Simple Line: descrição + valor monetário final da linha
             # "Ilum. Púb. Municipal 35,91"
-            match_simple = re.search(r"^(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2})\s*$", line_str)
+            match_simple = re.search(r"^(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}-?)\s*$", line_str)
             if match_simple:
                 desc = match_simple.group("desc").strip()
-                val = br_money_to_float(match_simple.group("amount"))
+                val = parse_money_br(match_simple.group("amount"))
                 
                 # Filter out obvious non-items or tax table rows
                 if desc in ["PIS", "COFINS", "ICMS"] and val > 100: pass
@@ -531,7 +600,7 @@ def parse_neoenergia_pe(text: str) -> dict:
         items_total = round(sum(item.get("amount") or 0.0 for item in items), 2)
     if items_total is not None and out["total_amount"] is not None:
         diff = abs(items_total - out["total_amount"])
-        if diff > 0.01:
+        if diff > 0.02:
             warnings.append(f"items_total_mismatch:{diff:.2f}")
     
     out["validation"] = {

@@ -52,10 +52,15 @@ def _install_fastapi_stubs():
 
 
 _install_fastapi_stubs()
-from app import parse_neoenergia_pe
+from app import parse_neoenergia_pe, parse_money_br
 
 
 class NeoenergiaParserTests(unittest.TestCase):
+    def test_parse_money_br_handles_trailing_minus(self):
+        self.assertAlmostEqual(parse_money_br("82,91"), 82.91, places=2)
+        self.assertAlmostEqual(parse_money_br(" 27,86- "), -27.86, places=2)
+        self.assertAlmostEqual(parse_money_br("1.234,56"), 1234.56, places=2)
+
     def test_multa_juros_reference_invoice_and_amount(self):
         text = """
 REF:MÊS/ANO                       TOTAL A PAGAR R$                         VENCIMENTO
@@ -226,6 +231,32 @@ B92417 ... 6.328,00 ... 8.327,00 ... 1,00000 ... 0,00
         self.assertEqual(reading["current_reading_date"], "2026-01-16")
         self.assertEqual(reading["next_reading_date"], "2026-02-13")
         self.assertNotIn("meter_readings_not_found", result["validation"]["warnings"])
+
+    def test_parses_icms_cde_credit_and_band_and_reconciles_total(self):
+        text = """
+REF:MÊS/ANO                       TOTAL A PAGAR R$                         VENCIMENTO
+12/2025                                         82,91                  26/01/2026
+ITENS DA FATURA
+Consumo-TUSD                  kWh                100,00     0,65530000              65,53
+Consumo-TE                    kWh                100,00     0,37800000              37,80
+Acrés. Band. AMARELA  0,75  0,03  0,75  20,50  0,15
+Ilum. Púb. Municipal                                                                 5,16
+ICMS-CDE NF387011514 1,53
+Créd Viol< 2,3kV U 27,86-
+TOTAL                                                                               82,91
+"""
+        result = parse_neoenergia_pe(text)
+        by_desc = {item["description"]: item for item in result["items"]}
+
+        self.assertAlmostEqual(by_desc["Consumo-TUSD"]["amount"], 65.53, places=2)
+        self.assertAlmostEqual(by_desc["Consumo-TE"]["amount"], 37.80, places=2)
+        self.assertAlmostEqual(by_desc["Acrés. Band. AMARELA"]["amount"], 0.75, places=2)
+        self.assertAlmostEqual(by_desc["Ilum. Púb. Municipal"]["amount"], 5.16, places=2)
+        self.assertAlmostEqual(by_desc["ICMS-CDE NF387011514"]["amount"], 1.53, places=2)
+        self.assertAlmostEqual(by_desc["Créd Viol< 2,3kV U"]["amount"], -27.86, places=2)
+
+        self.assertEqual(result["validation"]["items_total"], 82.91)
+        self.assertFalse(any(w.startswith("items_total_mismatch:") for w in result["validation"]["warnings"]))
 
 
 if __name__ == "__main__":
